@@ -25,6 +25,7 @@ public static class SceneBuilder
     const string MenuScenePath = ScenesFolder + "/MainMenu.unity";
     const string GameScenePath = ScenesFolder + "/Game.unity";
     const string ClickSoundPath = "Assets/Audio/click.wav";
+    const string KenneyFolder = "Assets/Models/Kenney";
     const string HitSoundPath = "Assets/Audio/hit.wav";
     const string HeavyHitSoundPath = "Assets/Audio/heavy_hit.wav";
     const string PlaceSoundPath = "Assets/Audio/place.wav";
@@ -67,7 +68,7 @@ public static class SceneBuilder
         public Material ground, path, spot, spawn, playerBase;
         public Material enemyBasic, enemyFast, enemyTank, nose;
         public Material towerBase, basicHead, heavyHead, barrel;
-        public Material projectile, heavyProjectile, trail;
+        public Material projectile, heavyProjectile, trail, kenney;
     }
 
     class Prefabs
@@ -305,6 +306,16 @@ public static class SceneBuilder
             heavyProjectile = SaveMaterial(Colored(lit, "HeavyProjectile", new Color(1.00f, 0.50f, 0.10f))),
         };
 
+        // One shared material for all Kenney models (they use a single colour palette texture).
+        Material kenney = Colored(lit, "KenneyColormap", Color.white);
+        Texture2D colormap = AssetDatabase.LoadAssetAtPath<Texture2D>(KenneyFolder + "/Textures/colormap.png");
+        if (colormap != null)
+        {
+            if (kenney.HasProperty("_BaseMap")) kenney.SetTexture("_BaseMap", colormap);
+            if (kenney.HasProperty("_MainTex")) kenney.SetTexture("_MainTex", colormap);
+        }
+        p.kenney = SaveMaterial(kenney);
+
         Shader trailShader = Shader.Find("Sprites/Default");
         Material trail = trailShader != null ? new Material(trailShader) : new Material(lit);
         trail.name = "ProjectileTrail";
@@ -426,6 +437,47 @@ public static class SceneBuilder
         return go;
     }
 
+    // Puts a Kenney model (CC0, see Assets/Models/Kenney/License.txt) under a parent.
+    // The old primitive shapes stay as invisible colliders, so hit detection does not change.
+    // If the model file is missing, the primitive stays visible instead.
+    // Sizes of the Kenney models relative to our shapes. Change these if a model looks too big or too small.
+    const float EnemyModelScale = 1.4f;
+    const float EnemyModelHeight = 0.5f;
+    const float TowerModelScale = 1.5f;
+    const float TowerHeadModelHeight = 0f;
+    const float TowerHeadYaw = 0f;
+
+    static Material KenneyMaterial()
+    {
+        return AssetDatabase.LoadAssetAtPath<Material>(MaterialsFolder + "/KenneyColormap.mat");
+    }
+
+    static bool AddModel(string file, Transform parent, Vector3 localPosition, float scale, float yaw, Material material)
+    {
+        GameObject asset = AssetDatabase.LoadAssetAtPath<GameObject>(KenneyFolder + "/" + file + ".fbx");
+        if (asset == null)
+        {
+            Debug.LogWarning("[SE320] Model not found, using the plain shape: " + file);
+            return false;
+        }
+
+        GameObject model = Object.Instantiate(asset);
+        model.name = "Model_" + file;
+        model.transform.SetParent(parent, false);
+        model.transform.localPosition = localPosition;
+        model.transform.localRotation = Quaternion.Euler(0f, yaw, 0f);
+        model.transform.localScale = Vector3.one * scale;
+        foreach (Renderer r in model.GetComponentsInChildren<Renderer>())
+            r.sharedMaterial = material;
+        return true;
+    }
+
+    static void HideRenderer(GameObject go)
+    {
+        MeshRenderer r = go.GetComponent<MeshRenderer>();
+        if (r != null) r.enabled = false;
+    }
+
     // Enemy root sits on the ground. The body cube and the "nose" (shows which way it faces) are children.
     static GameObject MakeEnemy<T>(string name, float size, Material bodyMaterial, Material noseMaterial,
         float speed, int health, int reward) where T : Enemy
@@ -436,10 +488,18 @@ public static class SceneBuilder
         body.isKinematic = true;
         body.useGravity = false;
 
-        Primitive(PrimitiveType.Cube, "Body", root.transform, new Vector3(0f, size / 2f, 0f),
+        GameObject bodyShape = Primitive(PrimitiveType.Cube, "Body", root.transform, new Vector3(0f, size / 2f, 0f),
             Vector3.one * size, bodyMaterial, true);
-        Primitive(PrimitiveType.Cube, "Nose", root.transform, new Vector3(0f, size * 0.6f, size * 0.65f),
+        GameObject noseShape = Primitive(PrimitiveType.Cube, "Nose", root.transform, new Vector3(0f, size * 0.6f, size * 0.65f),
             Vector3.one * (size * 0.3f), noseMaterial, false);
+
+        // Kenney UFO model on top. The cube stays as the (invisible) collider.
+        string ufo = name == "BasicEnemy" ? "enemy-ufo-a" : name == "FastEnemy" ? "enemy-ufo-b" : "enemy-ufo-d";
+        if (AddModel(ufo, root.transform, new Vector3(0f, size * EnemyModelHeight, 0f), size * EnemyModelScale, 0f, KenneyMaterial()))
+        {
+            HideRenderer(bodyShape);
+            HideRenderer(noseShape);
+        }
 
         T enemy = root.AddComponent<T>();
         SetFloat(enemy, "speed", speed);
@@ -459,17 +519,28 @@ public static class SceneBuilder
         rangeTrigger.isTrigger = true;
         rangeTrigger.radius = range;
 
-        Primitive(PrimitiveType.Cylinder, "Base", root.transform, new Vector3(0f, 0.3f, 0f),
+        GameObject baseShape = Primitive(PrimitiveType.Cylinder, "Base", root.transform, new Vector3(0f, 0.3f, 0f),
             new Vector3(1.2f, 0.3f, 1.2f), p.towerBase, false);
+        bool basic = name == "BasicTower";
+        if (AddModel(basic ? "tower-round-bottom-a" : "tower-square-bottom-a", root.transform, Vector3.zero,
+                TowerModelScale, 0f, KenneyMaterial()))
+            HideRenderer(baseShape);
 
         GameObject head = new GameObject("Head");
         head.transform.SetParent(root.transform, false);
         head.transform.localPosition = new Vector3(0f, 0.9f, 0f);
 
-        Primitive(PrimitiveType.Cube, "HeadMesh", head.transform, Vector3.zero,
+        GameObject headShape = Primitive(PrimitiveType.Cube, "HeadMesh", head.transform, Vector3.zero,
             new Vector3(0.8f, 0.6f, 0.8f), headMaterial, false);
-        Primitive(PrimitiveType.Cube, "Barrel", head.transform, new Vector3(0f, 0.05f, 0.4f + barrelLength / 2f),
+        GameObject barrelShape = Primitive(PrimitiveType.Cube, "Barrel", head.transform,
+            new Vector3(0f, 0.05f, 0.4f + barrelLength / 2f),
             new Vector3(barrelWidth, barrelWidth, barrelLength), p.barrel, false);
+        if (AddModel(basic ? "weapon-turret" : "weapon-cannon", head.transform, new Vector3(0f, TowerHeadModelHeight, 0f),
+                TowerModelScale, TowerHeadYaw, KenneyMaterial()))
+        {
+            HideRenderer(headShape);
+            HideRenderer(barrelShape);
+        }
 
         GameObject firePoint = new GameObject("FirePoint");
         firePoint.transform.SetParent(head.transform, false);
